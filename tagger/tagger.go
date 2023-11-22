@@ -5,15 +5,19 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"sort"
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/lomik/zapwriter"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/graphite-clickhouse/config"
 	"github.com/lomik/graphite-clickhouse/helper/RowBinary"
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
@@ -21,6 +25,12 @@ import (
 )
 
 const SelectChunksCount = 10
+
+type nopCloser struct {
+	io.Writer
+}
+
+func (nopCloser) Close() error { return nil }
 
 func countMetrics(body []byte) (int, error) {
 	var namelen uint64
@@ -68,17 +78,17 @@ func Make(cfg *config.Config) error {
 		ConnectTimeout: cfg.ClickHouse.ConnectTimeout,
 	}
 
-	begin := func(b string) {
+	begin := func(b string, fields ...zapcore.Field) {
 		block = b
 		start = time.Now()
-		logger.Info(block)
+		logger.Info(fmt.Sprintf("begin %s", block), fields...)
 	}
 
 	end := func() {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
 		d := time.Since(start)
-		logger.Info(block,
+		logger.Info(fmt.Sprintf("end %s", block),
 			zap.Duration("time", d),
 			zap.Uint64("mem_rss_mb", (m.Sys-m.HeapReleased)/1048576),
 		)
@@ -101,7 +111,6 @@ func Make(cfg *config.Config) error {
 
 	// Read clickhouse
 	begin("read and parse tree")
-	// bodies := make([][]byte, 0)
 
 	var bodies [][]byte
 
@@ -206,7 +215,7 @@ func Make(cfg *config.Config) error {
 	}
 	end()
 
-	begin("match")
+	begin("match", zap.Int("metrics_count", len(metricList)))
 	for index := 0; index < count; index++ {
 		m := &metricList[index]
 
@@ -231,15 +240,143 @@ func Make(cfg *config.Config) error {
 	}
 	end()
 
-	begin("marshal RowBinary + gzip")
-	// INSERT INTO graphite_tag (Date,Version,Level,Path,IsLeaf,Tags,Tag1) FORMAT RowBinary
-	// with Content-Encoding: gzip
+	threads := cfg.Tags.Threads
+	if threads <= 0 {
+		threads = 1
+	}
 
-	outBuf := new(bytes.Buffer)
-	writer := gzip.NewWriter(outBuf)
+	// remove metrics without tags
+	i := 0
+	for _, m := range metricList {
+		if m.Tags == nil || m.Tags.Len() == 0 {
+			continue
+		}
+		metricList[i] = m
+		i++
+	}
+	metricList = metricList[:i]
 
-	encoder := RowBinary.NewEncoder(writer)
+	if threads > len(metricList) {
+		threads = 1
+	}
 
+	begin("marshal RowBinary", zap.String("compression", string(cfg.Tags.Compression)), zap.Int("metrics_count", len(metricList)))
+	// cut into parts
+	metricListPartSize := len(metricList) / threads
+	metricListParts := make([][]Metric, threads)
+	for i := 0; i < threads-1; i++ {
+		metricListParts[i] = metricList[i*metricListPartSize : (i+1)*metricListPartSize]
+	}
+	metricListParts[threads-1] = metricList[(threads-1)*metricListPartSize:]
+
+	binaryParts := make([]*bytes.Buffer, threads)
+
+	eg := new(errgroup.Group)
+	eg.SetLimit(cfg.Common.MaxCPU)
+	for i := 0; i < threads; i++ {
+		binaryParts[i] = new(bytes.Buffer)
+		wc, err := wrapWithCompressor(cfg, binaryParts[i])
+		if err != nil {
+			return err
+		}
+		metricList := metricListParts[i]
+		eg.Go(func() error {
+			return encodeMetricsToRowBinary(metricList, date, version, wc)
+		})
+	}
+	err = eg.Wait()
+	if err != nil {
+		return err
+	}
+
+	emptyRecord := new(bytes.Buffer)
+	wc, err := wrapWithCompressor(cfg, emptyRecord)
+	if err != nil {
+		return err
+	}
+	err = encodeEmptyMetricToRowBinary(date, version, wc)
+	if err != nil {
+		return err
+	}
+	end()
+
+	if cfg.Tags.OutputFile != "" {
+		begin(fmt.Sprintf("write to %#v", cfg.Tags.OutputFile))
+		f, err := os.Create(cfg.Tags.OutputFile)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < threads; i++ {
+			_, err = binaryParts[i].WriteTo(f)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = emptyRecord.WriteTo(f)
+		if err != nil {
+			return err
+		}
+		err = f.Close()
+		if err != nil {
+			return err
+		}
+		end()
+	} else {
+		begin("upload to clickhouse")
+		upload := func(outBuf *bytes.Buffer) error {
+			_, _, _, err := clickhouse.PostWithEncoding(
+				scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.TagTable),
+				cfg.ClickHouse.URL,
+				fmt.Sprintf("INSERT INTO %s (Date,Version,Level,Path,IsLeaf,Tags,Tag1) FORMAT RowBinary", cfg.ClickHouse.TagTable),
+				outBuf,
+				cfg.Tags.Compression,
+				chOpts,
+				nil,
+			)
+			return err
+		}
+		eg := new(errgroup.Group)
+		for i := 0; i < threads; i++ {
+			outBuf := binaryParts[i]
+			eg.Go(func() error {
+				return upload(outBuf)
+			})
+		}
+		err = eg.Wait()
+		if err != nil {
+			return err
+		}
+		err = upload(emptyRecord)
+		if err != nil {
+			return err
+		}
+		end()
+	}
+
+	return nil
+}
+
+func wrapWithCompressor(cfg *config.Config, writer io.Writer) (io.WriteCloser, error) {
+	var wc io.WriteCloser
+	var err error
+	switch cfg.Tags.Compression {
+	case clickhouse.ContentEncodingNone:
+		wc = nopCloser{writer}
+	case clickhouse.ContentEncodingGzip:
+		wc = gzip.NewWriter(writer)
+	case clickhouse.ContentEncodingZstd:
+		wc, err = zstd.NewWriter(writer, zstd.WithEncoderConcurrency(1))
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unknown compression: %s", cfg.Tags.Compression)
+	}
+	return wc, nil
+}
+
+func encodeMetricsToRowBinary(metricList []Metric, date time.Time, version uint32, wc io.WriteCloser) error {
+	encoder := RowBinary.NewEncoder(wc)
 	days := RowBinary.DateToUint16(date)
 	metricBuffer := new(bytes.Buffer)
 	metricEncoder := RowBinary.NewEncoder(metricBuffer)
@@ -285,7 +422,7 @@ func Make(cfg *config.Config) error {
 		}
 
 		for _, tag := range m.Tags.List() {
-			_, err = writer.Write(metricBuffer.Bytes())
+			_, err = wc.Write(metricBuffer.Bytes())
 			if err != nil {
 				return err
 			}
@@ -298,10 +435,18 @@ func Make(cfg *config.Config) error {
 		}
 	}
 
-	// AND Empty record With Level=0, Path=0 and Without Tags
+	wc.Close()
+	return nil
+}
+
+// Empty record With Level=0, Path=0 and Without Tags
+// It is needed to filter current tags
+func encodeEmptyMetricToRowBinary(date time.Time, version uint32, wc io.WriteCloser) error {
+	encoder := RowBinary.NewEncoder(wc)
+	days := RowBinary.DateToUint16(date)
 
 	// Date
-	err = encoder.Uint16(days)
+	err := encoder.Uint16(days)
 	if err != nil {
 		return err
 	}
@@ -336,28 +481,6 @@ func Make(cfg *config.Config) error {
 		return err
 	}
 
-	writer.Close()
-	end()
-
-	if cfg.Tags.OutputFile != "" {
-		begin(fmt.Sprintf("write to %#v", cfg.Tags.OutputFile))
-		os.WriteFile(cfg.Tags.OutputFile, outBuf.Bytes(), 0644)
-		end()
-	} else {
-		begin("upload to clickhouse")
-		_, _, _, err = clickhouse.PostGzip(
-			scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.TagTable),
-			cfg.ClickHouse.URL,
-			fmt.Sprintf("INSERT INTO %s (Date,Version,Level,Path,IsLeaf,Tags,Tag1) FORMAT RowBinary", cfg.ClickHouse.TagTable),
-			outBuf,
-			chOpts,
-			nil,
-		)
-		if err != nil {
-			return err
-		}
-		end()
-	}
-
+	wc.Close()
 	return nil
 }
