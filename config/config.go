@@ -261,13 +261,15 @@ func clickhouseURLValidate(chURL string) (*url.URL, error) {
 
 // Tags config
 type Tags struct {
-	Rules       string                     `toml:"rules"       json:"rules"`
-	Date        string                     `toml:"date"        json:"date"`
-	ExtraWhere  string                     `toml:"extra-where" json:"extra-where"`
-	InputFile   string                     `toml:"input-file"  json:"input-file"`
-	OutputFile  string                     `toml:"output-file" json:"output-file"`
-	Threads     int                        `toml:"threads"     json:"threads"`
-	Compression clickhouse.ContentEncoding `toml:"compression" json:"compression"` // "none", "gzip" (default), "zstd"
+	Rules             string                     `toml:"rules"               json:"rules"`
+	Date              string                     `toml:"date"                json:"date"`
+	ExtraWhere        string                     `toml:"extra-where"         json:"extra-where"`
+	InputFile         string                     `toml:"input-file"          json:"input-file"`
+	OutputFile        string                     `toml:"output-file"         json:"output-file"`
+	Threads           int                        `toml:"threads"             json:"threads"`
+	Compression       clickhouse.ContentEncoding `toml:"compression"         json:"compression"` // "none", "gzip" (default), "zstd"
+	Version           uint32                     `toml:"version"             json:"version"`     // for testing purposes
+	SelectChunksCount int                        `toml:"select-chunks-count" json:"select-chunks-count"`
 }
 
 // Carbonlink configuration

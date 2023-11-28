@@ -96,6 +96,12 @@ func Make(cfg *config.Config) error {
 
 	version := uint32(time.Now().Unix())
 
+	if cfg.Tags.Version != 0 {
+		version = cfg.Tags.Version
+	}
+
+	logger.Info("start", zap.Uint32("version", version))
+
 	// Parse rules
 	begin("parse rules")
 	rules, err := ParseGlob(cfg.Tags.Rules)
@@ -109,8 +115,13 @@ func Make(cfg *config.Config) error {
 	}
 	end()
 
+	selectChunksCount := SelectChunksCount
+	if cfg.Tags.SelectChunksCount != 0 {
+		selectChunksCount = cfg.Tags.SelectChunksCount
+	}
+
 	// Read clickhouse
-	begin("read and parse tree")
+	begin("read metrics", zap.Int("chunks_count", selectChunksCount))
 
 	var bodies [][]byte
 
@@ -121,19 +132,19 @@ func Make(cfg *config.Config) error {
 		}
 		bodies = [][]byte{body}
 	} else {
-		bodies = make([][]byte, SelectChunksCount)
+		bodies = make([][]byte, selectChunksCount)
 		extraWhere := ""
 		if cfg.Tags.ExtraWhere != "" {
 			extraWhere = fmt.Sprintf("AND (%s)", cfg.Tags.ExtraWhere)
 		}
-		for i := 0; i < SelectChunksCount; i++ {
+		for i := 0; i < selectChunksCount; i++ {
 			bodies[i], _, _, err = clickhouse.Query(
 				scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.IndexTable),
 				cfg.ClickHouse.URL,
 				fmt.Sprintf(
 					"SELECT Path FROM %s WHERE cityHash64(Path) %% %d = %d %s AND Level > 20000 AND Level < 30000 AND Date = '1970-02-12' GROUP BY Path FORMAT RowBinary",
 					cfg.ClickHouse.IndexTable,
-					SelectChunksCount,
+					selectChunksCount,
 					i,
 					extraWhere,
 				),
@@ -145,6 +156,10 @@ func Make(cfg *config.Config) error {
 			}
 		}
 	}
+
+	end()
+
+	begin("parse metrics")
 
 	var count int
 
@@ -240,12 +255,7 @@ func Make(cfg *config.Config) error {
 	}
 	end()
 
-	threads := cfg.Tags.Threads
-	if threads <= 0 {
-		threads = 1
-	}
-
-	// remove metrics without tags
+	begin("remove metrics without tags", zap.Int("metrics_count", len(metricList)))
 	i := 0
 	for _, m := range metricList {
 		if m.Tags == nil || m.Tags.Len() == 0 {
@@ -255,19 +265,23 @@ func Make(cfg *config.Config) error {
 		i++
 	}
 	metricList = metricList[:i]
+	end()
 
-	if threads > len(metricList) {
-		threads = 1
+	if len(metricList) == 0 {
+		logger.Info("nothing to do", zap.Int("metrics_count", len(metricList)))
+		return nil
 	}
 
-	begin("marshal RowBinary", zap.String("compression", string(cfg.Tags.Compression)), zap.Int("metrics_count", len(metricList)))
-	// cut into parts
-	metricListPartSize := len(metricList) / threads
-	metricListParts := make([][]Metric, threads)
-	for i := 0; i < threads-1; i++ {
-		metricListParts[i] = metricList[i*metricListPartSize : (i+1)*metricListPartSize]
-	}
-	metricListParts[threads-1] = metricList[(threads-1)*metricListPartSize:]
+	begin("cut metrics into parts", zap.Int("metrics_count", len(metricList)))
+	metricListParts, tagsCount := cutMetricsIntoParts(metricList, cfg.Tags.Threads)
+	threads := len(metricListParts)
+	end()
+
+	begin("marshal RowBinary",
+		zap.String("compression", string(cfg.Tags.Compression)),
+		zap.Int("tags_count", tagsCount),
+		zap.Int("threads", threads),
+		zap.Int("max_cpu", cfg.Common.MaxCPU))
 
 	binaryParts := make([]*bytes.Buffer, threads)
 
@@ -322,7 +336,7 @@ func Make(cfg *config.Config) error {
 		}
 		end()
 	} else {
-		begin("upload to clickhouse")
+		begin("upload to clickhouse", zap.Int("threads", threads))
 		upload := func(outBuf *bytes.Buffer) error {
 			_, _, _, err := clickhouse.PostWithEncoding(
 				scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.TagTable),
@@ -354,6 +368,40 @@ func Make(cfg *config.Config) error {
 	}
 
 	return nil
+}
+
+func cutMetricsIntoParts(metricList []Metric, threads int) ([][]Metric, int) {
+	tagsCount := 0
+	for _, m := range metricList {
+		tagsCount += m.Tags.Len()
+	}
+	if threads < 2 {
+		return [][]Metric{metricList}, tagsCount
+	}
+	parts := make([][]Metric, 0, threads)
+	i := 0
+	partSize := (tagsCount-1)/threads + 1 // round up
+	cnt := 0
+	for j, m := range metricList {
+		if m.Tags == nil || m.Tags.Len() == 0 {
+			continue
+		}
+		cnt += m.Tags.Len()
+		if cnt >= partSize {
+			parts = append(parts, metricList[i:j+1])
+			i = j + 1
+			cnt = 0
+		}
+	}
+	if i < len(metricList) {
+		if cnt <= partSize/2 && len(parts) > 0 {
+			last := len(parts) - 1
+			parts[last] = parts[last][:len(parts[last])+len(metricList[i:])]
+		} else {
+			parts = append(parts, metricList[i:])
+		}
+	}
+	return parts, tagsCount
 }
 
 func wrapWithCompressor(cfg *config.Config, writer io.Writer) (io.WriteCloser, error) {
