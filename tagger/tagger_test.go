@@ -7,11 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCutMetricsIntoParts(t *testing.T) {
-	require := require.New(t)
+	require := assert.New(t)
 
 	metricList1 := []Metric{
 		{Tags: new(Set).Add("tag1", "tag2")},
@@ -61,6 +62,7 @@ func TestCutMetricsIntoParts(t *testing.T) {
 		{Tags: new(Set).Add("tag0", "tag1")},
 		{Tags: new(Set).Add("tag0", "tag1")},
 		{Tags: new(Set).Add("tag0", "tag1")},
+		{Tags: new(Set)},
 	}
 
 	testCases := []struct {
@@ -250,10 +252,39 @@ func TestCutMetricsIntoParts(t *testing.T) {
 			{
 				{Tags: new(Set).Add("tag0", "tag1")},
 				{Tags: new(Set).Add("tag0", "tag1")},
+				{Tags: new(Set)},
+			},
+		}},
+		{"case 6.2", metricList6, 7, [][]Metric{
+			{
+				{Tags: new(Set).Add("tag0", "tag1")},
+			},
+			{
+				{Tags: new(Set).Add("tag0")},
+				{Tags: new(Set).Add("tag0")},
+			},
+			{
+				{Tags: new(Set).Add("tag0", "tag1")},
+			},
+			{
+				{Tags: new(Set).Add("tag0", "tag1")},
+			},
+			{
+				{Tags: new(Set).Add("tag0", "tag1")},
+			},
+			{
+				{Tags: new(Set).Add("tag0", "tag1")},
+			},
+			{
+				{Tags: new(Set).Add("tag0", "tag1")},
+				{Tags: new(Set)},
 			},
 		}},
 	}
 	for _, tc := range testCases {
+		// if !strings.HasPrefix(tc.name, "case 6.") {
+		// 	continue
+		// }
 		t.Run(tc.name, func(t *testing.T) {
 			got, _ := cutMetricsIntoParts(tc.metricList, tc.threads)
 			require.Equal(len(tc.want), len(got), "unexpected number of parts")
@@ -270,7 +301,7 @@ func TestCutMetricsIntoPartsRandom(t *testing.T) {
 		tagsMax := rand.Intn(100) + 1
 		tagsCnt := 0
 		for i := range metricList {
-			tags := make([]string, rand.Intn(tagsMax))
+			tags := make([]string, rand.Intn(tagsMax)+1)
 			tagsCnt += len(tags)
 			for j := range tags {
 				tags[j] = fmt.Sprintf("tag%d", j)
@@ -283,7 +314,8 @@ func TestCutMetricsIntoPartsRandom(t *testing.T) {
 			threads = 1
 		}
 		if len(parts) > threads {
-			fmt.Println(json.MarshalIndent(parts, "", "    "))
+			v, _ := json.MarshalIndent(parts, "", "    ")
+			fmt.Println(string(v))
 		}
 		require.LessOrEqual(len(parts), threads, fmt.Sprint(tagsCnt, len(metricList), len(parts), threads))
 		if len(metricList) > 0 {
