@@ -395,6 +395,16 @@ func cutMetricsIntoParts(metricList []Metric, threads int) ([][]Metric, int) {
 	}
 	if i < len(metricList) {
 		if cnt <= partSize/2 && len(parts) > 0 {
+			// It is necessary to keep this short tail in the previous part.
+			// Otherwise, for example, with 3 threads the following list will contain only 1 item in the last part.
+			// []Metric{
+			// 	{Tags: new(Set).Add("tag1", "tag2")},
+			// 	{Tags: new(Set).Add("tag3", "tag4")},
+			// 	{Tags: new(Set).Add("tag5")},
+			// 	{Tags: new(Set).Add("tag6")},
+			// 	{Tags: new(Set).Add("tag7", "tag8")},
+			// 	{Tags: new(Set).Add("tag9")},
+			// }
 			last := len(parts) - 1
 			parts[last] = parts[last][:len(parts[last])+len(metricList[i:])]
 		} else {
