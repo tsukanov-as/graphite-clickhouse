@@ -392,6 +392,10 @@ Only one tag used as filter for index field Tag1, see graphite_tagged table [str
  # version = 0
  # number of chunks for selecting metrics from clickhouse (10 by default)
  # select-chunks-count = 0
+ # number of clickhouse request retries (5 by default)
+ # retries = 5
+ # pause between clickhouse request retries (1 second by default)
+ # pause-between-retries = "1s"
 
 [carbonlink]
  server = ""

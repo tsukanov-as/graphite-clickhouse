@@ -261,15 +261,17 @@ func clickhouseURLValidate(chURL string) (*url.URL, error) {
 
 // Tags config
 type Tags struct {
-	Rules             string                     `toml:"rules"               json:"rules"`
-	Date              string                     `toml:"date"                json:"date"`
-	ExtraWhere        string                     `toml:"extra-where"         json:"extra-where"`
-	InputFile         string                     `toml:"input-file"          json:"input-file"`
-	OutputFile        string                     `toml:"output-file"         json:"output-file"`
-	Threads           int                        `toml:"threads"             json:"threads"              comment:"number of threads for uploading tags to clickhouse (1 by default)"`
-	Compression       clickhouse.ContentEncoding `toml:"compression"         json:"compression"          comment:"compression method for tags before sending them to clickhouse (i.e. content encoding): gzip (default), none, zstd"`
-	Version           uint32                     `toml:"version"             json:"version"              comment:"fixed tags version for testing purposes (by default the current timestamp is used for each upload)"`
-	SelectChunksCount int                        `toml:"select-chunks-count" json:"select-chunks-count"  comment:"number of chunks for selecting metrics from clickhouse (10 by default)"`
+	Rules               string                     `toml:"rules"                 json:"rules"`
+	Date                string                     `toml:"date"                  json:"date"`
+	ExtraWhere          string                     `toml:"extra-where"           json:"extra-where"`
+	InputFile           string                     `toml:"input-file"            json:"input-file"`
+	OutputFile          string                     `toml:"output-file"           json:"output-file"`
+	Threads             int                        `toml:"threads"               json:"threads"               comment:"number of threads for uploading tags to clickhouse (1 by default)"`
+	Compression         clickhouse.ContentEncoding `toml:"compression"           json:"compression"           comment:"compression method for tags before sending them to clickhouse (i.e. content encoding): gzip (default), none, zstd"`
+	Version             uint32                     `toml:"version"               json:"version"               comment:"fixed tags version for testing purposes (by default the current timestamp is used for each upload)"`
+	SelectChunksCount   int                        `toml:"select-chunks-count"   json:"select-chunks-count"   comment:"number of chunks for selecting metrics from clickhouse (10 by default)"`
+	Retries             int                        `toml:"retries"               json:"retries"               comment:"number of clickhouse request retries (5 by default)"`
+	PauseBetweenRetries time.Duration              `toml:"pause-between-retries" json:"pause-between-retries" comment:"pause between clickhouse request retries (1 second by default)"`
 }
 
 // Carbonlink configuration
@@ -391,8 +393,10 @@ func New() *Config {
 			TagsLimiter:          limiter.NoopLimiter{},
 		},
 		Tags: Tags{
-			Threads:     1,
-			Compression: "gzip",
+			Threads:             1,
+			Compression:         "gzip",
+			Retries:             5,
+			PauseBetweenRetries: 1 * time.Second,
 		},
 		Carbonlink: Carbonlink{
 			Threads:        10,
