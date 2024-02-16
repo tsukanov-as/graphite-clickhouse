@@ -386,7 +386,7 @@ sample-thereafter = 12
 	assert.Equal(t, expected.ClickHouse, config.ClickHouse)
 
 	// Tags
-	expected.Tags = Tags{"filename", "2012-12-12", "AND case", "input", "output", 5, "zstd", 42, 15}
+	expected.Tags = Tags{"filename", "2012-12-12", "AND case", "input", "output", 5, "zstd", 42, 15, 5, 1 * time.Second}
 	assert.Equal(t, expected.Tags, config.Tags)
 
 	// Carbonlink
@@ -690,7 +690,7 @@ sample-thereafter = 12
 	assert.Equal(t, expected.ClickHouse, config.ClickHouse)
 
 	// Tags
-	expected.Tags = Tags{"filename", "2012-12-12", "AND case", "input", "output", 5, "zstd", 42, 15}
+	expected.Tags = Tags{"filename", "2012-12-12", "AND case", "input", "output", 5, "zstd", 42, 15, 5, 1 * time.Second}
 	assert.Equal(t, expected.Tags, config.Tags)
 
 	// Carbonlink
@@ -1009,7 +1009,7 @@ sample-thereafter = 12
 	assert.Equal(t, expected.ClickHouse, config.ClickHouse)
 
 	// Tags
-	expected.Tags = Tags{"filename", "2012-12-12", "AND case", "input", "output", 5, "zstd", 42, 15}
+	expected.Tags = Tags{"filename", "2012-12-12", "AND case", "input", "output", 5, "zstd", 42, 15, 5, 1 * time.Second}
 	assert.Equal(t, expected.Tags, config.Tags)
 
 	// Carbonlink

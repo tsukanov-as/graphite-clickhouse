@@ -138,22 +138,37 @@ func Make(cfg *config.Config) error {
 			extraWhere = fmt.Sprintf("AND (%s)", cfg.Tags.ExtraWhere)
 		}
 		for i := 0; i < selectChunksCount; i++ {
-			bodies[i], _, _, err = clickhouse.Query(
-				scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.IndexTable),
-				cfg.ClickHouse.URL,
-				fmt.Sprintf(
-					"SELECT Path FROM %s WHERE cityHash64(Path) %% %d = %d %s AND Level > 20000 AND Level < 30000 AND Date = '1970-02-12' GROUP BY Path FORMAT RowBinary",
-					cfg.ClickHouse.IndexTable,
-					selectChunksCount,
-					i,
-					extraWhere,
-				),
-				chOpts,
-				nil,
-			)
+			var body []byte
+			attempt := 0
+			for {
+				body, _, _, err = clickhouse.Query(
+					scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.IndexTable),
+					cfg.ClickHouse.URL,
+					fmt.Sprintf(
+						"SELECT Path FROM %s WHERE cityHash64(Path) %% %d = %d %s AND Level > 20000 AND Level < 30000 AND Date = '1970-02-12' GROUP BY Path FORMAT RowBinary",
+						cfg.ClickHouse.IndexTable,
+						selectChunksCount,
+						i,
+						extraWhere,
+					),
+					chOpts,
+					nil,
+				)
+				if err == nil {
+					break
+				}
+				logger.Info("chunk download failed", zap.Int("chunk", i), zap.Int("attempt", attempt))
+				if attempt < cfg.Tags.MaxRetries {
+					attempt++
+					time.Sleep(cfg.Tags.RetryAfter)
+					continue
+				}
+				break
+			}
 			if err != nil {
 				return err
 			}
+			bodies[i] = body
 		}
 	}
 
@@ -337,9 +352,9 @@ func Make(cfg *config.Config) error {
 		end()
 	} else {
 		begin("upload to clickhouse", zap.Int("threads", threads))
-		upload := func(outBuf *bytes.Buffer) error {
+		upload := func(ctx context.Context, outBuf *bytes.Buffer) error {
 			_, _, _, err := clickhouse.PostWithEncoding(
-				scope.New(context.Background()).WithLogger(logger).WithTable(cfg.ClickHouse.TagTable),
+				scope.New(ctx).WithLogger(logger).WithTable(cfg.ClickHouse.TagTable),
 				cfg.ClickHouse.URL,
 				fmt.Sprintf("INSERT INTO %s (Date,Version,Level,Path,IsLeaf,Tags,Tag1) FORMAT RowBinary", cfg.ClickHouse.TagTable),
 				outBuf,
@@ -349,18 +364,40 @@ func Make(cfg *config.Config) error {
 			)
 			return err
 		}
-		eg := new(errgroup.Group)
+		eg, ctx := errgroup.WithContext(context.Background())
 		for i := 0; i < threads; i++ {
 			outBuf := binaryParts[i]
+			part := i
 			eg.Go(func() error {
-				return upload(outBuf)
+				var err error
+				attempt := 0
+				for {
+					err = upload(ctx, outBuf)
+					if err == nil {
+						break
+					}
+					logger.Info("part upload failed", zap.Int("part", part), zap.Int("attempt", attempt))
+					if attempt < cfg.Tags.MaxRetries {
+						attempt++
+						timer := time.NewTimer(cfg.Tags.RetryAfter)
+						select {
+						case <-ctx.Done():
+							timer.Stop()
+							return ctx.Err()
+						case <-timer.C:
+						}
+						continue
+					}
+					break
+				}
+				return err
 			})
 		}
 		err = eg.Wait()
 		if err != nil {
 			return err
 		}
-		err = upload(emptyRecord)
+		err = upload(context.Background(), emptyRecord)
 		if err != nil {
 			return err
 		}
